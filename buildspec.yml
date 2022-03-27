@@ -1,0 +1,54 @@
+version: 0.2
+run-as: root
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws --version
+      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 539994651765.dkr.ecr.us-east-1.amazonaws.com
+      - REPOSITORY_URI=539994651765.dkr.ecr.us-east-1.amazonaws.com/book
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH:=latest}
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo $REPOSITORY_URI
+      - echo $IMAGE_TAG
+      - echo Building the Docker image...
+      - docker build -t book .
+      - docker tag book:latest 539994651765.dkr.ecr.us-east-1.amazonaws.com/book:latest
+      - docker tag book:latest 539994651765.dkr.ecr.us-east-1.amazonaws.com/book:$IMAGE_TAG
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker images...
+      - docker push 539994651765.dkr.ecr.us-east-1.amazonaws.com/book:latest
+      - docker push 539994651765.dkr.ecr.us-east-1.amazonaws.com/book:$IMAGE_TAG
+      - echo Writing image definitions file...
+      - printf '[{"name":"book","imageUri":"%s"}]' $REPOSITORY_URI:$IMAGE_TAG > imagedefinitions.json
+artifacts:
+  files:
+    - imagedefinitions.json
+    - appspec.yaml
+    - taskdef.json
+# version: 0.2
+
+# phases:
+#   install:
+#     runtime-versions:
+#       nodejs: 12
+#     commands:
+#       - echo Logging in to Amazon ECR...
+#       - aws --version
+#   build:
+#     commands:
+#       - echo Running build...
+#       - echo Build started on `date`
+#   post_build:
+#     commands:
+#       - echo Tests completed on `date`
+
+# cache:
+#   paths:
+#     - '/root/.npm/**/*'

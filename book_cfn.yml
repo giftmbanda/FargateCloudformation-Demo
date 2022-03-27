@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for Fargate'
+
+Parameters:
+  VPC:
+    Type: AWS::EC2::VPC::Id
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+  SubnetC:
+    Type: AWS::EC2::Subnet::Id
+  ImageURL:
+    Type: String
+    Default: 539994651765.dkr.ecr.us-east-1.amazonaws.com/book #public.ecr.aws/w0w2z2x4/book
+  ContainerName:
+    Type: String
+    Default: book
+  ContainerPort:
+    Type: Number
+    Default: 8080
+  LoadBalancerPort:
+    Type: Number
+    Default: 80
+  HealthCheckPath:
+    Type: String
+    Default: /
+  DesiredCount:
+    Type: Number
+    Default: 3
+  MinContainers:
+    Type: Number
+    Default: 2
+  MaxContainers:
+    Type: Number
+    Default: 5
+  AutoScalingTargetValue: # target CPU utilization as a percentage (%)
+    Type: Number
+    Default: 50
+  ContainerCPU:
+    Type: Number
+    Default: 256
+  ContainerMemory:
+    Type: Number
+    Default: 512
+
+Resources:
+  # Create an ECS Cluster
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${AWS::StackName}-Cluster # #book-Cluster
+
+  # Create a TaskDefinition with container details
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: CloudwatchLogGroup # Makes sure the log group is created before it is used.
+    Properties:
+      Family: !Sub ${AWS::StackName}-TaskDefinition
+      NetworkMode: awsvpc # awsvpc is required for Fargate
+      Cpu: !Ref ContainerCPU
+      Memory: !Ref ContainerMemory
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ExecutionRole # grants the Amazon ECS container agent permission to make AWS API calls on your behalf
+      TaskRoleArn: !Ref TaskRole # grants containers in the task permission to call AWS APIs on your behalf
+      ContainerDefinitions:
+        - Name: !Ref ContainerName
+          Image: !Ref ImageURL
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          LogConfiguration: # Send logs to AWS CloudWatch Logs
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref CloudwatchLogGroup
+              awslogs-stream-prefix: ecs
+
+  # A role needed by ECS
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-ExecutionRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  # A role for the containers
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-TaskRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+
+  # CloudwatchLogsGroup
+  CloudwatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AWS::StackName}
+      RetentionInDays: 7
+
+  # Create a LoadBalancer and attach the Security group and Subnets
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Type: application
+      Name: !Sub ${AWS::StackName}-LoadBalancer
+      LoadBalancerAttributes:
+        # this is the default, but is specified here in case it needs to be changed
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        # The load balancer is placed into the public subnets, so that traffic
+        # from the internet can reach the load balancer directly via the internet gateway
+        - !Ref SubnetA
+        - !Ref SubnetB
+        - !Ref SubnetC
+
+  # Create a security group for load balancer and open port 80 in bound from internet
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-LoadBalancerSecurityGroup
+      GroupDescription: Security Group that controls who can access the load balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIpv6: ::/0 # anyone on the internet
+          Description: Inbound rule for IPv6 traffic
+          IpProtocol: TCP
+          FromPort: !Ref LoadBalancerPort
+          ToPort: !Ref LoadBalancerPort
+        - CidrIp: 0.0.0.0/0 # anyone on the internet
+          Description: Inbound rule for IPv4 traffic
+          IpProtocol: TCP
+          FromPort: !Ref LoadBalancerPort
+          ToPort: !Ref LoadBalancerPort
+
+  # Create a TargetGroup
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: LoadBalancer
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: !Ref HealthCheckPath # will look for a 200 status code by default unless specified otherwise
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      HealthyThresholdCount: 2
+      HealthCheckProtocol: HTTP
+      Name: !Sub ${AWS::StackName}-TargetGroup
+      Port: !Ref ContainerPort # port 8080
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # default is 300
+      TargetType: ip
+      VpcId: !Ref VPC
+
+  # Create a LoadBalancerListener and attach the TargetGroup and LoadBalancer
+  # to route all the traffic of the LoadBalancer to the TargetGroup
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: LoadBalancer
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !Ref LoadBalancerPort # port 80
+      Protocol: HTTP
+
+  # Create a security group for Containers and open in bound Container port from Load balancer security group to the Container
+  ClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-ClusterSecurityGroup
+      GroupDescription: Security Group for traffic between LoadBalancer and Cluster (Containers)
+      VpcId: !Ref VPC
+      SecurityGroupIngress: # Only allow in bound from the load balancer
+        - SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+          IpProtocol: -1
+
+  # Create an ECS Service and add created Cluster, TaskDefinition, Subnets, TargetGroup and SecurityGroup
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: LoadBalancerListener # This dependency is needed so that the load balancer is setup correctly in time
+    Properties:
+      ServiceName: !Sub ${AWS::StackName}-Service
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: !Ref DesiredCount
+      HealthCheckGracePeriodSeconds: 60
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED # change to DISABLED if you're using private subnets that have access to a NAT gateway
+          SecurityGroups:
+            - !Ref ClusterSecurityGroup
+          Subnets:
+            - !Ref SubnetA
+            - !Ref SubnetB
+            - !Ref SubnetB
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroup
+          ContainerName: !Ref ContainerName
+          ContainerPort: !Ref ContainerPort
+
+  # A role needed for auto scaling
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-AutoScalingRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole'
+
+  # The Amazon Resource Name (ARN) of an AWS Identity and Access Management (IAM) role
+  # that allows Application Auto Scaling to modify your scalable target."
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinContainers
+      MaxCapacity: !Ref MaxContainers
+      ResourceId: !Join ['/', [service, !Ref Cluster, !GetAtt Service.Name]]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !GetAtt AutoScalingRole.Arn
+
+  # AutoScalingPolicy
+  AutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-AutoScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 10
+        TargetValue: !Ref AutoScalingTargetValue # Keep things at or lower than 50% CPU utilization, for example
+
+Outputs:
+  ApplicationURL:
+    Description: The DNS name of the load balancer, this is the URL where we can access the application.
+    Value: !Sub http://${LoadBalancer.DNSName}
