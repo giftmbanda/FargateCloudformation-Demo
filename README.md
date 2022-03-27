@@ -9,7 +9,7 @@ This includes but is not limited to:
 * Load balancer (associated to HTTP Listener and Target Group)
 * Load balancer Security Group (associated with the Load Balancer)
 * HTTP Listener (associated with the load balancer)
-* Service
+* Service (ECS Service)
 * Target Group
 * Task Definition
 * Cloudwatch Log Group (associated with the Task Definition)
